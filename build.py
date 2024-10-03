@@ -153,7 +153,10 @@ class Builder():
         if (len(sys.argv) > 1):
             for i in sys.argv[1:]:
                 i = i.lower()
-                if (i == "clean"):
+                if (i == "cleanall"):
+                    self.clean()
+                    self.cleanLibs()
+                elif (i == "clean"):
                     self.clean()
                 elif (i in ["lib", "libs", "getlib", "getlibs"]):
                     self.getLibs()
