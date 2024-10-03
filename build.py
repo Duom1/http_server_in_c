@@ -9,10 +9,13 @@ class Builder():
     def __init__(self):
         self.sources = [
             "main.c",
+        ]
+        self.libSources = [
             "bstrlib/bstrlib.c",
         ]
         self.name = "prog"
         self.objs: list[str] = []
+        self.libObjs: list[str] = []
         self.firstArg = 1
 
         self.bstrzip = "https://github.com/websnarf/bstrlib/archive/refs/tags/v1.0.0.zip"
@@ -69,23 +72,28 @@ class Builder():
             sys.exit(self.EXIT_FAILURE)
 
     def compileSources(self):
-        global objRecompiled
-        for i, item in enumerate(self.sources):
+        sources = self.sources + self.libSources
+        objs = self.objs + self.libObjs
+        for i, item in enumerate(sources):
             cfileTime = os.path.getmtime(item)
             try:
-                ofileTime = os.path.getmtime(self.objs[i])
+                ofileTime = os.path.getmtime(objs[i])
             except FileNotFoundError:
                 ofileTime = 0
             if (cfileTime < ofileTime):
                 continue
-            objRecompiled = True
-            command = " ".join([self.cc, self.compileTac, item, self.outTac, self.objs[i], self.cflags, self.platformTac])
+            self.objRecompiled = True
+            if (item in self.libSources and platform.system() == "Linux"):
+                cflags = self.cflags.replace("-Wall -Wextra -pedantic -std=c99 ", "")
+            else:
+                cflags = self.cflags
+            command = " ".join([self.cc, self.compileTac, item, self.outTac, objs[i], cflags, self.platformTac])
             self.runCommand(command);
 
     def link(self):
         self.compileSources()
-        if (objRecompiled):
-            command = " ".join([self.cc, " ".join(self.objs), self.outTac, self.name, self.ldflags])
+        if (self.objRecompiled):
+            command = " ".join([self.cc, " ".join(self.objs + self.libObjs), self.outTac, self.name, self.ldflags])
             self.runCommand(command);
         else:
             print("no linking necesary")
@@ -97,6 +105,8 @@ class Builder():
     def craftObjs(self):
         for i in self.sources:
             self.objs.append(i.replace(".c", self.objectExt))
+        for i in self.libSources:
+            self.libObjs.append(i.replace(".c", self.objectExt))
 
     def debug(self):
         self.cflags += f" {self.cflagsDebug}"
@@ -126,6 +136,19 @@ class Builder():
     def getLibs(self):
         self.getbstr()
 
+    def ensureLibs(self):
+        if (not(os.path.exists(self.bstrlibFolder+"/bstrlib.c"))):
+            print(f"{self.redAnsi}could not find bstrlib file{self.normalAnsi}\nattempting installation")
+            self.getbstr()
+            if (not(os.path.exists(self.bstrlibFolder+"/bstrlib.c"))):
+                print(f"{self.redAnsi}could not find bstrlib file second time failing build{self.normalAnsi}\n")
+                sys.exit(self.EXIT_FAILURE)
+        print(f"{self.greenAnsi}succesfully found bstrlib{self.normalAnsi}")
+
+    def cleanLibs(self):
+        command = " ".join([self.rm, " ".join(self.libObjs)])
+        self.runCommand(command)
+
     def argumentCheck(self):
         if (len(sys.argv) > 1):
             for i in sys.argv[1:]:
@@ -134,10 +157,14 @@ class Builder():
                     self.clean()
                 elif (i in ["lib", "libs", "getlib", "getlibs"]):
                     self.getLibs()
-                elif (i in ["rmlib", "rmlibs"]):
+                elif (i in ["rmlib", "rmlibs", "removelib", "removelibs"]):
                     self.rmLibs()
                 elif (i in ["default", "def"]):
                     self.default()
+                elif (i in ["ensurelib", "ensurelibs"]):
+                    self.ensureLibs()
+                elif (i in ["libclean", "cleanlib", "libsclean", "cleanlibs"]):
+                    self.cleanLibs()
                 elif (i == "debug"):
                     self.debug()
                 elif (i == "release"):
@@ -149,6 +176,6 @@ class Builder():
             self.default()
 
 if __name__ == "__main__":
-    builder = Builder()
-    builder.craftObjs()
-    builder.argumentCheck()
+    b = Builder()
+    b.craftObjs()
+    b.argumentCheck()

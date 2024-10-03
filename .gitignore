@@ -3,3 +3,4 @@ prog
 *.o
 *.obj
 *.exe
+/__pycache__
