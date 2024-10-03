@@ -1,0 +1,5 @@
+prog
+/bstrlib
+*.o
+*.obj
+*.exe
