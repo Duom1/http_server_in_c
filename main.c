@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 199309L
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -22,16 +23,16 @@
 
 #ifdef PLATFORM_WINDOWS
 #define SLEEP(a) Sleep(a)
-// Close function call needs to be closesocket on windows.
-#define close(a) closesocket(a)
+#define CLOSESOCKET(a) closesocket(a)
 #else
+#define CLOSESOCKET(a) close(a)
 #define SLEEP(a)                                                               \
-  do {                                                                         \
+  {                                                                            \
     struct timespec ts;                                                        \
     ts.tv_sec = (a) / 1000;                                                    \
     ts.tv_nsec = ((a) % 1000) * 1000000;                                       \
     nanosleep(&ts, NULL);                                                      \
-  } while (0)
+  }
 #endif
 
 #define RN "\r\n"      // Macro for carridge returns newline.
@@ -40,44 +41,45 @@
 #define NON_BLOCKING_EXTRA_SLEEP_MILS                                          \
   (100) // Sleep time between nonblocking socket calls
 #define REQUEST_TIMEOUT_AFTER_SEC                                              \
-  (10)                     // Time out amount if proper request is not recieved
+  (20) // Time out amount if proper request is not recieved
+#define THREAD_FREE_WAIT_MILLIS                                                \
+  (100)                    // The time program waits to check if a thread
+                           // is available
 #define BUFFER_SIZE (1024) // Size of the request buffer.
 #define CONNECTION_AMT (3) // The amount of connections given to listen()
 #define PORT (8080)        // Port that the program uses.
+#define THREADS (5)        // The number of threads for processing requests.
 
-// Structure for helping the handeling of cleanup on exit.
+bstring drn_bstr;
+
 struct {
   bool binded_sock;
-  bool buffer_created;
-  bool request_string_set;
-  bool drn_string_set;
+  int thread_in_use[THREADS];
 #ifdef PLATFORM_WINDOWS
   bool wsa_started;
 #endif
   int sockfd;
-  char *buffer;
-  bstring *request_string;
-  bstring *drn_string;
+  pthread_t threads[THREADS];
 } clean_on_exit;
 
-// Function taht handles cleanup on exit.
+typedef struct {
+  int socket;
+  int thread_number;
+} handle_request_args;
+
 void exit_clean(void) {
   if (clean_on_exit.binded_sock) {
     printf("closing socket\n");
-    close(clean_on_exit.sockfd);
+    CLOSESOCKET(clean_on_exit.sockfd);
   }
-  if (clean_on_exit.buffer_created) {
-    printf("freeing buffer\n");
-    free(clean_on_exit.buffer);
+  for (int i = 0; i < THREADS; i++) {
+    if (clean_on_exit.thread_in_use[i]) {
+      i--;
+      SLEEP(THREAD_FREE_WAIT_MILLIS);
+    }
   }
-  if (clean_on_exit.request_string_set) {
-    printf("detroying request string\n");
-    bdestroy(*clean_on_exit.request_string);
-  }
-  if (clean_on_exit.drn_string_set) {
-    printf("detroying drn string\n");
-    bdestroy(*clean_on_exit.drn_string);
-  }
+  printf("destroying drn bstring\n");
+  bdestroy(drn_bstr);
 #ifdef PLAFORM_WINDOWS
   if (clean_on_exit.wsa_started) {
     printf("cleaning wsa\n");
@@ -86,29 +88,96 @@ void exit_clean(void) {
 #endif
 }
 
-// Function for handeling the interrupt signals.
 void handle_sigint(int sig) {
   printf("\nrecieved sigint (%i) terninating...\n", sig);
   exit(EXIT_SUCCESS);
 }
 
-int main(void) {
-  // Variable ret is used for functions that return an integer value for error
-  // cheking.
+// Needs connection fd and thread number as inputs.
+void *handle_request(void *inargs) {
+  handle_request_args *args = (handle_request_args *)inargs;
+  clean_on_exit.thread_in_use[args->thread_number] = true;
   int ret;
-  // Variable port is the port used by this program.
+  bstring request = bfromcstr("");
+  char *buf = malloc(BUFFER_SIZE);
+
+  // Variable cc_on stands for client connected on and it is the unix time
+  // stamp of when it happened.
+  int cc_on = (int)time(NULL);
+  printf("client connected on %i\n", cc_on);
+
+  // The loop for reading the request.
+  // Variable cur_it stands for current iteration.
+  int cur_it = 0;
+  while (true) {
+
+    // Trying to recieve bytes from the client.
+    int bytes_recieved = recv(args->socket, buf, BUFFER_SIZE, 0);
+    // If no bytes where recived check if the connection should time out
+    // or continue looking for them.
+    if (bytes_recieved <= 0) {
+      if ((int)time(NULL) - cc_on > REQUEST_TIMEOUT_AFTER_SEC) {
+        printf("connection timed out sending response anyway\n");
+        break;
+      }
+      SLEEP(NON_BLOCKING_EXTRA_SLEEP_MILS);
+      continue;
+    }
+
+    // Concatenate the buffer to the request string.
+    ret = bcatcstr(request, buf);
+    if (ret != BSTR_OK) {
+      fprintf(stderr, "failed to concat string to request string\n");
+    }
+
+    // Cheking if the request has come to an end.
+    // The staring position for the search is cur_it * BUFFER_SIZE
+    // so that we don't read the first parts of the request multiple times
+    if (binstr(request, cur_it * BUFFER_SIZE, drn_bstr) > 0) {
+      printf("got the request\n");
+      break;
+    }
+
+    // Cheking if the request is longer than needed.
+    if (request->slen > 10 * BUFFER_SIZE) {
+      printf("request exceeded %i bytes sending response without getting "
+             "full request\n",
+             10 * BUFFER_SIZE);
+      break;
+    }
+
+    // Increment the iterator that keeps track of how many buffers have been
+    // red (readed?).
+    cur_it++;
+  }
+
+  // Creting a response and sending it;
+  bstring response = bfromcstr("HTTP/1.1 200 OK" RN "Content-Type: "
+                               "text/html" RN "Content-Length: 5" DRN "hello");
+  send(args->socket, response->data, response->slen, 0);
+  printf("sent response to client\n");
+
+  free(buf);
+  bdestroy(response);
+  bdestroy(request);
+  CLOSESOCKET(args->socket);
+
+  clean_on_exit.thread_in_use[args->thread_number] = false;
+  free(inargs);
+  return NULL;
+}
+
+int main(void) {
+  int ret;
   int port = PORT;
 
-  // Making it so that the exit_clean function is run when the
-  // program is closed in order to clean up resources.
   atexit(exit_clean);
-  // Sets a custom handler for interrupt signals.
   signal(SIGINT, handle_sigint);
-  // Setting all the clean up values to false.
-  clean_on_exit.buffer_created = false;
   clean_on_exit.binded_sock = false;
-  clean_on_exit.drn_string_set = false;
-  clean_on_exit.request_string_set = false;
+  memset(&clean_on_exit.thread_in_use, false,
+         sizeof(clean_on_exit.thread_in_use));
+  memset(&clean_on_exit.threads, -1, sizeof(clean_on_exit.threads));
+  drn_bstr = bfromcstr(DRN);
   // On windows platform it is necesary to create and initialise
   // WSA.
 #ifdef PLATFORM_WINDOWS
@@ -123,14 +192,12 @@ int main(void) {
   clean_on_exit.wsa_started = true;
 #endif
 
-  // Attempts to create a socket.
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
     fprintf(stderr, "unable to create socket\n");
     exit(EXIT_FAILURE);
   }
 
-  // Creating sock address structure used in the program
   struct sockaddr_in addr;
   memset(&addr, 0, sizeof(struct sockaddr_in));
   addr.sin_family = AF_INET;
@@ -138,7 +205,6 @@ int main(void) {
   // addr.sin_addr.s_addr = INADDR_ANY;
   addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-  // Binds the socket and does error checking
   ret = bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
   if (ret < 0) {
     int err = errno;
@@ -164,35 +230,11 @@ int main(void) {
 
   listen(sockfd, CONNECTION_AMT);
 
-  // Allocating memory for the buffer.
-  char *buf = malloc(BUFFER_SIZE);
-  clean_on_exit.buffer_created = true;
-  clean_on_exit.buffer = buf;
-
-  // Creating strings for the main loop
-  // Variable drn_bstr stands for double carridge return
-  // newline better string. And like the name implies
-  // is a better string library string that contains
-  // two \r\n characters.
-  bstring request = bfromcstr("");
-  clean_on_exit.request_string_set = true;
-  clean_on_exit.request_string = &request;
-  bstring drn_bstr = bfromcstr(DRN);
-  clean_on_exit.drn_string_set = true;
-  clean_on_exit.drn_string = &drn_bstr;
-
   // The main loop on the program
   while (true) {
-    // Truncating the request string in order to not
-    // have multiple requests in the same string.
-    ret = btrunc(request, 0);
-    if (ret != BSTR_OK) {
-      fprintf(stderr, "failed to trucate request string to 0\n");
-    }
-
     // Variable confd stands for connection filedescriptor and is the
     // filedescriptor for the connection made by a client.
-    int confd;
+    int confd = 0;
     while (true) {
       confd = accept(sockfd, NULL, NULL);
       int err = errno;
@@ -215,70 +257,18 @@ int main(void) {
       exit(EXIT_FAILURE);
     }
 
-    // Variable cc_on stands for client connected on and it is the unix time
-    // stamp of when it happened.
-    int cc_on = (int)time(NULL);
-    printf("client connected on %i\n", cc_on);
-
-    // The loop for reading the request.
-    // Variable cur_it stands for current iteration.
-    int cur_it = 0;
-    int bytes_recieved = 0;
-    while (true) {
-
-      // Trying to recieve bytes from the client.
-      // The rbuf part of the variable recieved_rbuf stands for
-      // relative to buffer since the size will be relative to the buffer.
-      int recieved_rbuf = recv(confd, buf, BUFFER_SIZE, 0);
-      // If no bytes where recived check if the connection should time out
-      // or continue looking for them.
-      if (recieved_rbuf <= 0) {
-        if ((int)time(NULL) - cc_on > REQUEST_TIMEOUT_AFTER_SEC) {
-          printf("connection timed out sending response anyway\n");
-          break;
-        }
-        SLEEP(NON_BLOCKING_EXTRA_SLEEP_MILS);
-        continue;
-      }
-
-      // Adding the amount of bytes recieved from recv function to the
-      // cumulative count of all the bytes.
-      // And then concatenating the bytes to the request string.
-      bytes_recieved += recieved_rbuf;
-      ret = bcatcstr(request, buf);
-      if (ret != BSTR_OK) {
-        fprintf(stderr, "failed to concat string to request string\n");
-      }
-
-      // Cheking if the request has come to an end.
-      // The staring position for the search is cur_it * BUFFER_SIZE
-      // so that we don't read the first parts of the request multiple times
-      if (binstr(request, cur_it * BUFFER_SIZE, drn_bstr) > 0) {
+    for (int i = 0; i < THREADS; i++) {
+      if (!clean_on_exit.thread_in_use[i]) {
+        handle_request_args *args = malloc(sizeof(handle_request_args));
+        args->socket = confd;
+        args->thread_number = i;
+        pthread_create(&clean_on_exit.threads[i], NULL, handle_request, args);
         break;
+      } else if (i + 1 == THREADS) {
+        i = -1;
+        SLEEP(THREAD_FREE_WAIT_MILLIS);
       }
-
-      // Cheking if the request is longer than needed.
-      if (bytes_recieved > 10 * BUFFER_SIZE) {
-        printf("request exceeded %i bytes sending response wihtout getting "
-               "full request\n",
-               10 * BUFFER_SIZE);
-        break;
-      }
-
-      // Increment the iterator that keeps track of how many buffers have been
-      // red (readed?).
-      cur_it++;
     }
-
-    // Creting a response sending it and then deallocating the strings memory.
-    bstring response =
-        bfromcstr("HTTP/1.1 200 OK" RN "Content-Type: "
-                  "text/html" RN "Content-Length: 5" DRN "hello");
-    send(confd, response->data, response->slen, 0);
-    printf("sent response to client\n");
-    bdestroy(response);
-
-    close(confd);
   }
 
   // If the code goes here something went wrong in the main loop.
