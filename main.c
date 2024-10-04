@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 199309L
+#ifdef _WIN32
+#define HAVE_STRUCT_TIMESPEC
+#endif
 #include <errno.h>
-#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -12,16 +14,16 @@
 
 #include "bstrlib/bstrlib.h"
 
-#ifdef PLATFORM_WINDOWS
+#ifdef _WIN32
 #include <Windows.h>
-#include <io.h>
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
 
-#ifdef PLATFORM_WINDOWS
+#ifdef _WIN32
 #define SLEEP(a) Sleep(a)
 #define CLOSESOCKET(a) closesocket(a)
 #else
@@ -42,30 +44,25 @@
   (100) // Sleep time between nonblocking socket calls
 #define REQUEST_TIMEOUT_AFTER_SEC                                              \
   (20) // Time out amount if proper request is not recieved
-#define THREAD_FREE_WAIT_MILLIS                                                \
-  (100)                    // The time program waits to check if a thread
-                           // is available
-#define BUFFER_SIZE (1024) // Size of the request buffer.
-#define CONNECTION_AMT (3) // The amount of connections given to listen()
-#define PORT (8080)        // Port that the program uses.
-#define THREADS (5)        // The number of threads for processing requests.
+#define THREAD_FREE_WAIT_MILS                                                  \
+  (100)                     // The time program waits to check if a thread
+                            // is available
+#define BUFFER_SIZE (1024)  // Size of the request buffer.
+#define CONNECTION_AMT (10) // The amount of connections given to listen()
+#define PORT (8080)         // Port that the program uses.
+#define THREADS (50)        // The number of threads for processing requests.
 
 bstring drn_bstr;
 
 struct {
   bool binded_sock;
   int thread_in_use[THREADS];
-#ifdef PLATFORM_WINDOWS
+#ifdef _WIN32
   bool wsa_started;
 #endif
   int sockfd;
   pthread_t threads[THREADS];
 } clean_on_exit;
-
-typedef struct {
-  int socket;
-  int thread_number;
-} handle_request_args;
 
 void exit_clean(void) {
   if (clean_on_exit.binded_sock) {
@@ -75,12 +72,12 @@ void exit_clean(void) {
   for (int i = 0; i < THREADS; i++) {
     if (clean_on_exit.thread_in_use[i]) {
       i--;
-      SLEEP(THREAD_FREE_WAIT_MILLIS);
+      SLEEP(THREAD_FREE_WAIT_MILS);
     }
   }
   printf("destroying drn bstring\n");
   bdestroy(drn_bstr);
-#ifdef PLAFORM_WINDOWS
+#ifdef _WIN32
   if (clean_on_exit.wsa_started) {
     printf("cleaning wsa\n");
     WSACleanup();
@@ -92,6 +89,11 @@ void handle_sigint(int sig) {
   printf("\nrecieved sigint (%i) terninating...\n", sig);
   exit(EXIT_SUCCESS);
 }
+
+typedef struct {
+  int socket;
+  int thread_number;
+} handle_request_args;
 
 // Needs connection fd and thread number as inputs.
 void *handle_request(void *inargs) {
@@ -117,8 +119,8 @@ void *handle_request(void *inargs) {
     // or continue looking for them.
     if (bytes_recieved <= 0) {
       if ((int)time(NULL) - cc_on > REQUEST_TIMEOUT_AFTER_SEC) {
-        printf("connection timed out sending response anyway\n");
-        break;
+        printf("connection timed out\n");
+        goto close_without_response;
       }
       SLEEP(NON_BLOCKING_EXTRA_SLEEP_MILS);
       continue;
@@ -134,7 +136,6 @@ void *handle_request(void *inargs) {
     // The staring position for the search is cur_it * BUFFER_SIZE
     // so that we don't read the first parts of the request multiple times
     if (binstr(request, cur_it * BUFFER_SIZE, drn_bstr) > 0) {
-      printf("got the request\n");
       break;
     }
 
@@ -157,14 +158,41 @@ void *handle_request(void *inargs) {
   send(args->socket, response->data, response->slen, 0);
   printf("sent response to client\n");
 
-  free(buf);
   bdestroy(response);
+
+close_without_response:
+
+  free(buf);
   bdestroy(request);
   CLOSESOCKET(args->socket);
 
   clean_on_exit.thread_in_use[args->thread_number] = false;
   free(inargs);
   return NULL;
+}
+
+// Function to set the socket to non-blocking mode.
+int set_nonblocking(int sock) {
+#ifdef _WIN32
+  unsigned long mode = 1;
+  if (ioctlsocket(sock, FIONBIO, &mode) != 0) {
+    int err = WSAGetLastError();
+    fprintf(stderr, "Failed to set non-blocking mode: %d\n", err);
+    return -1;
+  }
+#else
+  int flags = fcntl(sock, F_GETFL, 0);
+  if (flags == -1) {
+    fprintf(stderr, "fcntl(F_GETFL) failed: %s\n", strerror(errno));
+    return -1;
+  }
+  if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+    fprintf(stderr, "fcntl(F_SETFL) failed: %s\n", strerror(errno));
+    return -1;
+  }
+#endif
+
+  return 0;
 }
 
 int main(void) {
@@ -180,7 +208,7 @@ int main(void) {
   drn_bstr = bfromcstr(DRN);
   // On windows platform it is necesary to create and initialise
   // WSA.
-#ifdef PLATFORM_WINDOWS
+#ifdef _WIN32
   clean_on_exit.wsa_started = false;
 
   WSADATA wsa_data;
@@ -215,16 +243,8 @@ int main(void) {
   clean_on_exit.binded_sock = true;
   clean_on_exit.sockfd = sockfd;
 
-  // This code gets the socket filedescriptor flags and adds
-  // non blocking to them and set them back.
-  int flags = fcntl(sockfd, F_GETFL, 0);
-  if (flags < 0) {
-    fprintf(stderr, "something went wrong when getting socket flags\n");
-    exit(EXIT_FAILURE);
-  }
-  flags |= O_NONBLOCK;
-  if (fcntl(sockfd, F_SETFL, flags) < 0) {
-    fprintf(stderr, "unable to set socket flags\n");
+  if (set_nonblocking(sockfd) != 0) {
+    fprintf(stderr, "error setting soket to non blocking mode\n");
     exit(EXIT_FAILURE);
   }
 
@@ -244,16 +264,8 @@ int main(void) {
       SLEEP(NON_BLOCKING_EXTRA_SLEEP_MILS);
     }
 
-    // This code gets the new connection filedescriptor flags and adds
-    // non blocking to them and set them back.
-    flags = fcntl(confd, F_GETFL, 0);
-    if (flags < 0) {
-      fprintf(stderr, "something went wrong when getting connection flags\n");
-      exit(EXIT_FAILURE);
-    }
-    flags |= O_NONBLOCK;
-    if (fcntl(confd, F_SETFL, flags) < 0) {
-      fprintf(stderr, "unable to set connection flags\n");
+    if (set_nonblocking(confd) != 0) {
+      fprintf(stderr, "error setting soket to non blocking mode\n");
       exit(EXIT_FAILURE);
     }
 
@@ -266,7 +278,7 @@ int main(void) {
         break;
       } else if (i + 1 == THREADS) {
         i = -1;
-        SLEEP(THREAD_FREE_WAIT_MILLIS);
+        SLEEP(THREAD_FREE_WAIT_MILS);
       }
     }
   }

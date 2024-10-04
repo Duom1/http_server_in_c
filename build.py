@@ -22,6 +22,21 @@ class Builder():
         self.bstrzipName = "bstrlib.zip"
         self.bstrlibFolder = self.bstrzipName.replace(".zip", "")
 
+        self.pthreadsLinks = [
+            "https://ftp.funet.fi/pub/mirrors/sources.redhat.com/pub/pthreads-win32/prebuilt-dll-2-8-0-release/lib/pthreadVC2.lib", # lib needs to be first
+            "https://ftp.funet.fi/pub/mirrors/sources.redhat.com/pub/pthreads-win32/prebuilt-dll-2-8-0-release/lib/pthreadVC2.dll",
+            "https://ftp.funet.fi/pub/mirrors/sources.redhat.com/pub/pthreads-win32/prebuilt-dll-2-8-0-release/include/pthread.h",
+            "https://ftp.funet.fi/pub/mirrors/sources.redhat.com/pub/pthreads-win32/prebuilt-dll-2-8-0-release/include/sched.h",
+            "https://ftp.funet.fi/pub/mirrors/sources.redhat.com/pub/pthreads-win32/prebuilt-dll-2-8-0-release/include/semaphore.h",
+        ]
+        self.pthreadsFiles = [
+            "pthreadVC2.lib", # lib needs to be first
+            "pthreadVC2.dll",
+            "pthread.h",
+            "sched.h",
+            "semaphore.h",
+        ]
+
         self.normalAnsi = "\x1B[0m"
         self.greenAnsi = "\x1B[32m"
         self.redAnsi= "\x1B[31m"
@@ -35,9 +50,9 @@ class Builder():
             self.cflagsRelease = "-O3 -march=native"
             self.ldflags = ""
             self.outTac = "-o"
+            self.objOutTac = self.outTac
             self.objectExt = ".o"
             self.compileTac = "-c"
-            self.platformTac = ""
             self.rm = "rm -f"
             self.rmFolder = "rm -f -r"
             self.curl = "curl"
@@ -46,19 +61,21 @@ class Builder():
         elif (platform.system() == "Windows"):
             self.name += ".exe"
             self.cc = "cl"
-            self.cflags = "/W4"
+            self.cflags = "/W4 /I."
             self.cflagsDebug = "/Zi"
             self.cflagsRelease = "/O2"
-            self.ldflags = "ws2_32.lib"
+            self.ldflags = "ws2_32.lib "+self.pthreadsFiles[0]
             self.outTac = "/Fe:"
+            self.objOutTac = "/Fo:"
             self.objectExt = ".obj"
             self.compileTac = "/c"
-            self.platformTac = "/DPLATFORM_WINDOWS"
             self.rm = "del"
             self.rmFolder = "del"
             self.curl = "curl.exe"
             self.unzip = "tar -xf"
             self.mv = "move"
+            for i, item in enumerate(self.libSources):
+                self.libSources[i] = item.replace("/", "\\")
         else:
             print("system type not detected")
             sys.exit(self.EXIT_FAILURE)
@@ -87,7 +104,7 @@ class Builder():
                 cflags = self.cflags.replace("-Wall -Wextra -pedantic -std=c99 ", "")
             else:
                 cflags = self.cflags
-            command = " ".join([self.cc, self.compileTac, item, self.outTac, objs[i], cflags, self.platformTac])
+            command = " ".join([self.cc, self.compileTac, item, self.objOutTac, objs[i], cflags])
             self.runCommand(command);
 
     def link(self):
@@ -129,14 +146,31 @@ class Builder():
         command = " ".join([self.mv, "bstrlib-1.0.0", self.bstrlibFolder]);
         self.runCommand(command)
 
+    def getWin32Pthread(self):
+        for i, item in enumerate(self.pthreadsLinks):
+            command = " ".join([self.curl, "-L", item, ">", self.pthreadsFiles[i]])
+            self.runCommand(command)
+
     def rmLibs(self):
-        command = " ".join([self.rmFolder, self.bstrlibFolder]);
+        command = " ".join([self.rmFolder, self.bstrlibFolder, " ".join(self.pthreadsFiles)]);
         self.runCommand(command)
 
     def getLibs(self):
         self.getbstr()
+        if (platform.system() == "Windows"):
+            self.getWin32Pthread;
 
     def ensureLibs(self):
+        if (platform.system() == "Windows"):
+            for i in self.pthreadsFiles:
+                if (not os.path.exists(i)):
+                    print(f"{self.redAnsi}could not find pthread files{self.normalAnsi}\nattempting installation")
+                    self.getWin32Pthread()
+                    for i in self.pthreadsFiles:
+                        if (not os.path.exists(i)):
+                            print(f"{self.redAnsi}un able to get pthread libs{self.normalAnsi}")
+                            sys.exit(self.EXIT_FAILURE)
+        print(f"{self.greenAnsi}succesfully found pthread files{self.normalAnsi}")
         if (not(os.path.exists(self.bstrlibFolder+"/bstrlib.c"))):
             print(f"{self.redAnsi}could not find bstrlib file{self.normalAnsi}\nattempting installation")
             self.getbstr()
