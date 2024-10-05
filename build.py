@@ -13,7 +13,7 @@ class Builder():
         self.libSources = [
             "bstrlib/bstrlib.c",
         ]
-        self.name = "prog"
+        self.name = "server"
         self.objs: list[str] = []
         self.libObjs: list[str] = []
         self.firstArg = 1
@@ -170,7 +170,7 @@ class Builder():
                         if (not os.path.exists(i)):
                             print(f"{self.redAnsi}un able to get pthread libs{self.normalAnsi}")
                             sys.exit(self.EXIT_FAILURE)
-        print(f"{self.greenAnsi}succesfully found pthread files{self.normalAnsi}")
+            print(f"{self.greenAnsi}succesfully found pthread files{self.normalAnsi}")
         if (not(os.path.exists(self.bstrlibFolder+"/bstrlib.c"))):
             print(f"{self.redAnsi}could not find bstrlib file{self.normalAnsi}\nattempting installation")
             self.getbstr()
