@@ -44,15 +44,44 @@
   (100) // Sleep time between nonblocking socket calls
 #define REQUEST_TIMEOUT_AFTER_SEC                                              \
   (20) // Time out amount if proper request is not recieved
+#define OTHER_FUCNTION_THREAD_NUM                                              \
+  (-2) // the thread number of other fucntions like exit_clean and handle_sigint
+#define MAIN_FUCNTION_THREAD_NUM (-1) // the thread number of main function
 #define THREAD_FREE_WAIT_MILS                                                  \
   (100)                     // The time program waits to check if a thread
                             // is available
-#define BUFFER_SIZE (1024)  // Size of the request buffer.
 #define CONNECTION_AMT (10) // The amount of connections given to listen()
-#define PORT (8080)         // Port that the program uses.
-#define THREADS (50)        // The number of threads for processing requests.
+#define BUFFER_SIZE (1024)  // Size of the request buffer.
+#define LOG_FILE "http-server.log" // the path for the logging file
+#define THREADS (50) // The number of threads for processing requests.
+#define PORT (8080)  // Port that the program uses.
 
 bstring drn_bstr;
+FILE *logging_file;
+bool disable_debug_log = false;
+
+void log_generic(char *msg, char *tag, int thread_num) {
+  time_t ut = time(NULL);
+  struct tm *lt = localtime(&ut);
+  fprintf(logging_file, "[%i/%i/%i %i:%i:%i] [%i] [thread: %i] [%s]: %s",
+          lt->tm_mday, lt->tm_mon + 1, lt->tm_year + 1900, lt->tm_hour,
+          lt->tm_min, lt->tm_sec, (int)ut, thread_num, tag, msg);
+  fflush(logging_file);
+}
+void log_debug(char *msg, int thread_num) {
+  if (!(disable_debug_log)) {
+    log_generic(msg, "DEBUG", thread_num);
+  }
+}
+void log_info(char *msg, int thread_num) {
+  log_generic(msg, "INFO", thread_num);
+}
+void log_error(char *msg, int thread_num) {
+  log_generic(msg, "ERROR", thread_num);
+}
+void log_critical(char *msg, int thread_num) {
+  log_generic(msg, "CRITICAL", thread_num);
+}
 
 struct {
   bool binded_sock;
@@ -66,7 +95,7 @@ struct {
 
 void exit_clean(void) {
   if (clean_on_exit.binded_sock) {
-    printf("closing socket\n");
+    log_info("closing socket\n", OTHER_FUCNTION_THREAD_NUM);
     CLOSESOCKET(clean_on_exit.sockfd);
   }
   for (int i = 0; i < THREADS; i++) {
@@ -75,18 +104,21 @@ void exit_clean(void) {
       SLEEP(THREAD_FREE_WAIT_MILS);
     }
   }
-  printf("destroying drn bstring\n");
+  log_info("destroying drn bstring\n", OTHER_FUCNTION_THREAD_NUM);
   bdestroy(drn_bstr);
 #ifdef _WIN32
   if (clean_on_exit.wsa_started) {
-    printf("cleaning wsa\n");
+    log_info("cleaning wsa\n", OTHER_FUCNTION_THREAD_NUM);
     WSACleanup();
   }
 #endif
+  log_info("closing logging file\n", OTHER_FUCNTION_THREAD_NUM);
+  fclose(logging_file);
 }
 
-void handle_sigint(int sig) {
-  printf("\nrecieved sigint (%i) terninating...\n", sig);
+void handle_sig(int sig) {
+  log_info("recieved signal", OTHER_FUCNTION_THREAD_NUM);
+  fprintf(logging_file, " (%i) closing server\n", sig);
   exit(EXIT_SUCCESS);
 }
 
@@ -103,10 +135,8 @@ void *handle_request(void *inargs) {
   bstring request = bfromcstr("");
   char *buf = malloc(BUFFER_SIZE);
 
-  // Variable cc_on stands for client connected on and it is the unix time
-  // stamp of when it happened.
   int cc_on = (int)time(NULL);
-  printf("client connected on %i\n", cc_on);
+  log_info("client connected\n", args->thread_number);
 
   // The loop for reading the request.
   // Variable cur_it stands for current iteration.
@@ -119,7 +149,7 @@ void *handle_request(void *inargs) {
     // or continue looking for them.
     if (bytes_recieved <= 0) {
       if ((int)time(NULL) - cc_on > REQUEST_TIMEOUT_AFTER_SEC) {
-        printf("connection timed out\n");
+        log_info("connection timed out\n", args->thread_number);
         goto close_without_response;
       }
       SLEEP(NON_BLOCKING_EXTRA_SLEEP_MILS);
@@ -129,7 +159,8 @@ void *handle_request(void *inargs) {
     // Concatenate the buffer to the request string.
     ret = bcatcstr(request, buf);
     if (ret != BSTR_OK) {
-      fprintf(stderr, "failed to concat string to request string\n");
+      log_error("failed to concat string to request string\n",
+                args->thread_number);
     }
 
     // Cheking if the request has come to an end.
@@ -140,23 +171,26 @@ void *handle_request(void *inargs) {
     }
 
     // Cheking if the request is longer than needed.
-    if (request->slen > 10 * BUFFER_SIZE) {
-      printf("request exceeded %i bytes sending response without getting "
-             "full request\n",
-             10 * BUFFER_SIZE);
+    static const int max_buffer = 10;
+    if (request->slen > max_buffer * BUFFER_SIZE) {
+      log_info("request exceeded", args->thread_number);
+      fprintf(logging_file, " %i bytes\n", max_buffer * BUFFER_SIZE);
       break;
     }
 
-    // Increment the iterator that keeps track of how many buffers have been
-    // red (readed?).
     cur_it++;
   }
 
-  // Creting a response and sending it;
+  log_debug("request:", args->thread_number);
+  fprintf(logging_file, " %s", request->data);
+
+  // Creting a response and sending it
   bstring response = bfromcstr("HTTP/1.1 200 OK" RN "Content-Type: "
                                "text/html" RN "Content-Length: 5" DRN "hello");
   send(args->socket, response->data, response->slen, 0);
-  printf("sent response to client\n");
+  log_info("sent response to client\n", args->thread_number);
+  log_debug("response: ", args->thread_number);
+  fprintf(logging_file, " %s\n", response->data);
 
   bdestroy(response);
 
@@ -172,6 +206,7 @@ close_without_response:
 }
 
 // Function to set the socket to non-blocking mode.
+// Returns 0 on success.
 int set_nonblocking(int sock) {
 #ifdef _WIN32
   unsigned long mode = 1;
@@ -183,11 +218,11 @@ int set_nonblocking(int sock) {
 #else
   int flags = fcntl(sock, F_GETFL, 0);
   if (flags == -1) {
-    fprintf(stderr, "fcntl(F_GETFL) failed: %s\n", strerror(errno));
+    log_error("fcntl(F_GETFL) failed\n", OTHER_FUCNTION_THREAD_NUM);
     return -1;
   }
   if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
-    fprintf(stderr, "fcntl(F_SETFL) failed: %s\n", strerror(errno));
+    log_error("fcntl(F_SETFL) failed\n", OTHER_FUCNTION_THREAD_NUM);
     return -1;
   }
 #endif
@@ -199,8 +234,15 @@ int main(void) {
   int ret;
   int port = PORT;
 
+  logging_file = fopen(LOG_FILE, "w+");
+  if (logging_file == NULL) {
+    logging_file = stdout;
+    log_error("unable to open logging file, using stdout as fallback",
+              MAIN_FUCNTION_THREAD_NUM);
+  }
   atexit(exit_clean);
-  signal(SIGINT, handle_sigint);
+  signal(SIGINT, handle_sig);
+  signal(SIGTERM, handle_sig);
   clean_on_exit.binded_sock = false;
   memset(&clean_on_exit.thread_in_use, false,
          sizeof(clean_on_exit.thread_in_use));
@@ -222,7 +264,7 @@ int main(void) {
 
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) {
-    fprintf(stderr, "unable to create socket\n");
+    log_critical("unable to create socket\n", MAIN_FUCNTION_THREAD_NUM);
     exit(EXIT_FAILURE);
   }
 
@@ -235,16 +277,15 @@ int main(void) {
 
   ret = bind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
   if (ret < 0) {
-    int err = errno;
-    fprintf(stderr, "errno: %i\n", err);
-    fprintf(stderr, "could not bind\n");
+    log_critical("could not bind\n", MAIN_FUCNTION_THREAD_NUM);
     exit(EXIT_FAILURE);
   }
   clean_on_exit.binded_sock = true;
   clean_on_exit.sockfd = sockfd;
 
   if (set_nonblocking(sockfd) != 0) {
-    fprintf(stderr, "error setting soket to non blocking mode\n");
+    log_critical("error setting soket to non blocking mode\n",
+                 MAIN_FUCNTION_THREAD_NUM);
     exit(EXIT_FAILURE);
   }
 
@@ -265,8 +306,8 @@ int main(void) {
     }
 
     if (set_nonblocking(confd) != 0) {
-      fprintf(stderr, "error setting soket to non blocking mode\n");
-      exit(EXIT_FAILURE);
+      log_error("error setting socket to non blocking mode\n",
+                MAIN_FUCNTION_THREAD_NUM);
     }
 
     for (int i = 0; i < THREADS; i++) {

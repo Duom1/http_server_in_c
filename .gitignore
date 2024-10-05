@@ -5,3 +5,4 @@ prog
 *.exe
 /__pycache__
 http_server.zip
+http-server.log
