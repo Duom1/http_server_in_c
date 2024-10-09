@@ -13,6 +13,7 @@
 #include <time.h>
 
 #include "bstrlib/bstrlib.h"
+#include "stb_ds.h"
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -37,8 +38,8 @@
   }
 #endif
 
-#define RN "\r\n"      // Macro for carridge returns newline.
-#define DRN "\r\n\r\n" // Macro for two carridge returns and nelines
+#define RN "\r\n"
+#define DRN "\r\n\r\n"
 #define DN "\n\n"
 
 #define NON_BLOCKING_EXTRA_SLEEP_MILS                                          \
@@ -49,8 +50,10 @@
   (-2) // the thread number of other fucntions like exit_clean and handle_sigint
 #define MAIN_FUCNTION_THREAD_NUM (-1) // the thread number of main function
 #define THREAD_FREE_WAIT_MILS                                                  \
-  (100)                         // The time program waits to check if a thread
-                                // is available
+  (100) // The time program waits to check if a thread
+        // is available
+#define EXIT_PRINTF_ERROR                                                      \
+  (-20) // error code return if the program is unable to use printf
 #define CONSTANT_STRING_AMT (6) // the amount of constant strings
 #define CONNECTION_AMT (10)     // The amount of connections given to listen()
 #define BUFFER_SIZE (1024)      // Size of the request buffer.
@@ -58,18 +61,45 @@
 #define THREADS (50) // The number of threads for processing requests.
 #define PORT (8080)  // Port that the program uses.
 
-// TODO: better commenting
-// TODO: should make constants stored on the stack of these
-// but when i tried to do so the functions did not
-// work properly with them so should look into it
-bstring drn_bstr;
-bstring dn_bstr;
-bstring rn_bstr;
-bstring n_bstr;
-bstring rn_bstr_dummy;
-bstring n_bstr_dummy;
-bstring
-    *constant_strings[CONSTANT_STRING_AMT]; // a list for the strings juts above
+enum Http_request_types {
+  HTTP_GET,
+  HTTP_HEAD,
+  HTTP_POST,
+  HTTP_PUT,
+  HTTP_DELETE,
+  HTTP_CONNECT,
+  HTTP_OPTIONS,
+  HTTP_TRACE,
+  HTTP_PATCH,
+  HTTP_ENUM_MAX,
+};
+
+typedef struct {
+  enum Http_request_types type;
+  bstring path;
+  bstring version;
+  struct { // this uses the stb ds library string hashmap
+    char *key;
+    bstring value;
+  } *headers;
+} http_request_t;
+
+struct tagbstring drn_bstr;
+struct tagbstring dn_bstr;
+struct tagbstring rn_bstr;
+struct tagbstring n_bstr;
+struct tagbstring rn_bstr_dummy;
+struct tagbstring n_bstr_dummy;
+struct tagbstring get_bstr;
+struct tagbstring head_bstr;
+struct tagbstring post_bstr;
+struct tagbstring put_bstr;
+struct tagbstring delete_bstr;
+struct tagbstring connect_bstr;
+struct tagbstring options_bstr;
+struct tagbstring trace_bstr;
+struct tagbstring patch_bstr;
+
 FILE *logging_file;
 bool disable_debug_log = false;
 
@@ -91,20 +121,25 @@ void log_critical(char *msg, int thread_num) {
 }
 
 void log_generic(char *msg, char *tag, int thread_num) {
+  int ret;
   time_t ut = time(NULL);
   if ((int)ut < 0) { // if the return value of time function is less that zero
                      // it is an error
     log_critical("unable to get proper time", OTHER_FUCNTION_THREAD_NUM);
   }
   struct tm *lt = localtime(&ut);
-  struct tm backup = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  struct tm backup = {
+      0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0}; // in case localtime fails we can use this as a fallback
   if (lt == NULL) {
     lt = &backup;
   }
-  // TODO: potential error cheking for all printf calls in this program
-  fprintf(logging_file, "[%i/%i/%i %i:%i:%i] [%i] [thread: %i] [%s]: %s",
-          lt->tm_mday, lt->tm_mon + 1, lt->tm_year + 1900, lt->tm_hour,
-          lt->tm_min, lt->tm_sec, (int)ut, thread_num, tag, msg);
+  ret = fprintf(logging_file, "[%i/%i/%i %i:%i:%i] [%i] [thread: %i] [%s]: %s",
+                lt->tm_mday, lt->tm_mon + 1, lt->tm_year + 1900, lt->tm_hour,
+                lt->tm_min, lt->tm_sec, (int)ut, thread_num, tag, msg);
+  if (ret < 0) {
+    exit(EXIT_PRINTF_ERROR);
+  }
   fflush(logging_file);
 }
 
@@ -127,10 +162,6 @@ void exit_clean(void) {
     if (clean_on_exit.thread_in_use[i]) {
       pthread_join(clean_on_exit.threads[i], NULL);
     }
-  }
-  log_info("destroying constant strings\n", OTHER_FUCNTION_THREAD_NUM);
-  for (int i = 0; i < CONSTANT_STRING_AMT; i++) {
-    bdestroy((bstring)constant_strings[i]);
   }
 #ifdef _WIN32
   if (clean_on_exit.wsa_started) {
@@ -158,13 +189,13 @@ typedef struct {
 
 int newline_dummy(bstring string) {
   int ret;
-  ret = bfindreplace(string, rn_bstr, rn_bstr_dummy, 0);
+  ret = bfindreplace(string, &rn_bstr, &rn_bstr_dummy, 0);
   if (ret != BSTR_OK) {
     log_error("unable to replace newlines in request",
               OTHER_FUCNTION_THREAD_NUM);
     return -1;
   }
-  ret = bfindreplace(string, n_bstr, n_bstr_dummy, 0);
+  ret = bfindreplace(string, &n_bstr, &n_bstr_dummy, 0);
   if (ret != BSTR_OK) {
     log_error("unable to replace newlines in request",
               OTHER_FUCNTION_THREAD_NUM);
@@ -173,7 +204,91 @@ int newline_dummy(bstring string) {
   return 0;
 }
 
-// Needs connection fd and thread number as inputs.
+// TODO: Create a parser that parses an http request string into http request
+// struct. Does not validate path.
+// steps:
+// 1. split first line into method, path and version.
+// 2. add headers into stb hasmap
+// Returns 0 if successfull.
+int parse_http_request(http_request_t *request, bstring requets_str) {
+  struct bstrList *lines = NULL;
+  lines = bsplit(requets_str, '\n');
+  if (lines == NULL) {
+    log_error("unable to parse request string: pointer is null\n",
+              OTHER_FUCNTION_THREAD_NUM);
+    return -1;
+  }
+  if (lines->qty < 1) {
+    log_error("unable to parse request string: qty is less than 1\n",
+              OTHER_FUCNTION_THREAD_NUM);
+    bstrListDestroy(lines);
+    return -1;
+  }
+  struct bstrList *first_line = NULL;
+  lines = bsplit(lines->entry[0], ' ');
+  if (lines == NULL) {
+    log_error("unable to parse request string first line: pointer is null\n",
+              OTHER_FUCNTION_THREAD_NUM);
+    bstrListDestroy(lines);
+    return -1;
+  }
+  if (lines->qty < 3) {
+    log_error(
+        "unable to parse request string first line: qty is leass than 3\n",
+        OTHER_FUCNTION_THREAD_NUM);
+    bstrListDestroy(lines);
+    bstrListDestroy(first_line);
+    return -1;
+  }
+  // TODO: There should be a funtcin for copying strings directly but
+  // i can't seem to fin it.
+  request->path = bfromcstr((const char *)first_line->entry[1]->data);
+  request->version = bfromcstr((const char *)first_line->entry[2]->data);
+  if (binstr(first_line->entry[0], 0, &get_bstr) == 0) {
+    request->type = HTTP_GET;
+  } else if (binstr(first_line->entry[0], 0, &head_bstr) == 0) {
+    request->type = HTTP_HEAD;
+  } else if (binstr(first_line->entry[0], 0, &options_bstr) == 0) {
+    request->type = HTTP_OPTIONS;
+  } else if (binstr(first_line->entry[0], 0, &trace_bstr) == 0) {
+    request->type = HTTP_TRACE;
+  } else if (binstr(first_line->entry[0], 0, &put_bstr) == 0) {
+    request->type = HTTP_PUT;
+  } else if (binstr(first_line->entry[0], 0, &delete_bstr) == 0) {
+    request->type = HTTP_DELETE;
+  } else if (binstr(first_line->entry[0], 0, &post_bstr) == 0) {
+    request->type = HTTP_POST;
+  } else if (binstr(first_line->entry[0], 0, &patch_bstr) == 0) {
+    request->type = HTTP_PATCH;
+  } else if (binstr(first_line->entry[0], 0, &connect_bstr) == 0) {
+    request->type = HTTP_CONNECT;
+  } else {
+    log_error("unable to get http request method\n", OTHER_FUCNTION_THREAD_NUM);
+    bstrListDestroy(lines);
+    bstrListDestroy(first_line);
+    return -1;
+  }
+
+  sh_new_strdup(request->headers);
+  for (int i = 0; i < lines->qty; i++) {
+    struct bstrList *split_pair = NULL;
+    bsplit(lines->entry[i], ':');
+    if (split_pair == NULL) {
+      continue;
+    }
+    if (split_pair->qty < 2) {
+      continue;
+    }
+    bstring value_for_map = bfromcstr((const char *)split_pair->entry[1]->data);
+    shput(request->headers, split_pair->entry[0]->data, value_for_map);
+    bstrListDestroy(split_pair);
+  }
+
+  bstrListDestroy(lines);
+  bstrListDestroy(first_line);
+  return 0;
+}
+
 void *handle_request(void *inargs) {
   handle_request_args *args = (handle_request_args *)inargs;
   clean_on_exit.thread_in_use[args->thread_number] = true;
@@ -225,8 +340,8 @@ void *handle_request(void *inargs) {
     // Cheking if the request has come to an end.
     // The staring position for the search is cur_it * BUFFER_SIZE
     // so that we don't read the first parts of the request multiple times
-    if ((binstr(request, cur_it * BUFFER_SIZE, drn_bstr) > 0) ||
-        (binstr(request, cur_it * BUFFER_SIZE, dn_bstr) > 0)) {
+    if ((binstr(request, cur_it * BUFFER_SIZE, &drn_bstr) > 0) ||
+        (binstr(request, cur_it * BUFFER_SIZE, &dn_bstr) > 0)) {
       break;
     }
 
@@ -242,6 +357,7 @@ void *handle_request(void *inargs) {
     cur_it++;
   }
 
+  // making a dummy string so that it can be logged better
   bool unable_to_create_dummy_request = false;
   bstring dummy_request = bstrcpy(request);
   if (dummy_request == NULL) {
@@ -355,24 +471,21 @@ int main(void) {
     log_error("unable to use memset\n", MAIN_FUCNTION_THREAD_NUM);
   }
 
-  drn_bstr = bfromcstr(DRN);
-  dn_bstr = bfromcstr(DN);
-  rn_bstr_dummy = bfromcstr("\\r\\n");
-  n_bstr_dummy = bfromcstr("\\n");
-  n_bstr = bfromcstr("\n");
-  rn_bstr = bfromcstr(RN);
-  if (drn_bstr == NULL || dn_bstr == NULL || rn_bstr_dummy == NULL ||
-      n_bstr_dummy == NULL || n_bstr == NULL || rn_bstr == NULL) {
-    log_critical("unable to to crteate one of the essential strings\n",
-                 MAIN_FUCNTION_THREAD_NUM);
-    exit(EXIT_FAILURE);
-  }
-  constant_strings[0] = (struct tagbstring **)drn_bstr;
-  constant_strings[1] = (struct tagbstring **)dn_bstr;
-  constant_strings[2] = (struct tagbstring **)rn_bstr;
-  constant_strings[3] = (struct tagbstring **)rn_bstr_dummy;
-  constant_strings[4] = (struct tagbstring **)n_bstr;
-  constant_strings[5] = (struct tagbstring **)n_bstr_dummy;
+  drn_bstr = (struct tagbstring)bsStatic(DRN);
+  dn_bstr = (struct tagbstring)bsStatic(DN);
+  rn_bstr_dummy = (struct tagbstring)bsStatic("\\r\\n");
+  n_bstr_dummy = (struct tagbstring)bsStatic("\\n");
+  n_bstr = (struct tagbstring)bsStatic("\n");
+  rn_bstr = (struct tagbstring)bsStatic(RN);
+  get_bstr = (struct tagbstring)bsStatic("GET");
+  head_bstr = (struct tagbstring)bsStatic("HEAD");
+  post_bstr = (struct tagbstring)bsStatic("POST");
+  put_bstr = (struct tagbstring)bsStatic("PUT");
+  delete_bstr = (struct tagbstring)bsStatic("DELETE");
+  connect_bstr = (struct tagbstring)bsStatic("CONNECT");
+  options_bstr = (struct tagbstring)bsStatic("OPTIONS");
+  trace_bstr = (struct tagbstring)bsStatic("TRACE");
+  patch_bstr = (struct tagbstring)bsStatic("PATCH");
 
 // On windows platform it is necesary to create and initialise
 // WSA.
@@ -468,6 +581,7 @@ int main(void) {
   }
 
   // If the code goes here something went wrong in the main loop.
-  // The code should be terminated with exit() function in the main loop..
+  // The code should be terminated with exit() function in the main loop or
+  // ohther functions.
   return EXIT_FAILURE;
 }

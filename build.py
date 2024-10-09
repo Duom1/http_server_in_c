@@ -12,6 +12,7 @@ class Builder():
         ]
         self.libSources = [
             "bstrlib/bstrlib.c",
+            "stb_ds.c",
         ]
         self.name = "server"
         self.objs: list[str] = []
@@ -36,6 +37,10 @@ class Builder():
             "sched.h",
             "semaphore.h",
         ]
+
+        # might need to update this in the future
+        self.stbDsLink = "https://raw.githubusercontent.com/nothings/stb/31707d14fdb75da66b3eed52a2236a70af0d0960/stb_ds.h"
+        self.stbDsName = "stb_ds.h"
 
         self.normalAnsi = "\x1B[0m"
         self.greenAnsi = "\x1B[32m"
@@ -136,6 +141,10 @@ class Builder():
     def default(self):
         self.debug()
 
+    def getStbDs(self):
+        command = " ".join([self.curl, "-L", self.stbDsLink, ">", self.stbDsName])
+        self.runCommand(command)
+
     def getbstr(self):
         command = " ".join([self.curl, "-L", self.bstrzip, ">", self.bstrzipName])
         self.runCommand(command)
@@ -157,6 +166,7 @@ class Builder():
 
     def getLibs(self):
         self.getbstr()
+        self.getStbDs()
         if (platform.system() == "Windows"):
             self.getWin32Pthread;
 
@@ -178,6 +188,13 @@ class Builder():
                 print(f"{self.redAnsi}could not find bstrlib file second time failing build{self.normalAnsi}\n")
                 sys.exit(self.EXIT_FAILURE)
         print(f"{self.greenAnsi}succesfully found bstrlib{self.normalAnsi}")
+        if (not(os.path.exists(self.stbDsName))):
+            print(f"{self.redAnsi}could not find stb ds file{self.normalAnsi}\nattempting installation")
+            self.getStbDs()
+            if (not(os.path.exists(self.stbDsName))):
+                print(f"{self.redAnsi}could not find stbds file second time failing build{self.normalAnsi}\n")
+                sys.exit(self.EXIT_FAILURE)
+        print(f"{self.greenAnsi}succesfully found stb ds{self.normalAnsi}")
 
     def cleanLibs(self):
         command = " ".join([self.rm, " ".join(self.libObjs)])
