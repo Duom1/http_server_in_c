@@ -161,7 +161,7 @@ class Builder():
             self.runCommand(command)
 
     def rmLibs(self):
-        command = " ".join([self.rmFolder, self.bstrlibFolder, " ".join(self.pthreadsFiles)]);
+        command = " ".join([self.rmFolder, self.bstrlibFolder, " ".join(self.pthreadsFiles), self.stbDsName]);
         self.runCommand(command)
 
     def getLibs(self):

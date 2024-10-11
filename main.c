@@ -85,6 +85,17 @@ const char *http_request_strings[HTTP_ENUM_MAX] = {
     "CONNECT", "OPTIONS", "TRACE", "PATCH",
 };
 
+typedef struct http_response_t {
+  bstring version;
+  int code;
+  bstring message;
+  struct { // this uses the stb ds library string hashmap
+    char *key;
+    bstring value;
+  } *headers;
+  bstring content;
+} http_response_t;
+
 typedef struct http_request_t {
   enum Http_request_types type;
   bstring path;
@@ -111,6 +122,26 @@ struct tagbstring connect_bstr;
 struct tagbstring options_bstr;
 struct tagbstring trace_bstr;
 struct tagbstring patch_bstr;
+
+struct tagbstring http_100 = bsStatic("Continue");
+struct tagbstring http_101 = bsStatic("Switching Protocols");
+struct tagbstring http_200 = bsStatic("OK");
+struct tagbstring http_201 = bsStatic("Created");
+struct tagbstring http_204 = bsStatic("No Content");
+struct tagbstring http_301 = bsStatic("Moved Permanently");
+struct tagbstring http_302 = bsStatic("Found");
+struct tagbstring http_304 = bsStatic("Not Modified");
+struct tagbstring http_400 = bsStatic("Bad Request");
+struct tagbstring http_401 = bsStatic("Unauthorized");
+struct tagbstring http_403 = bsStatic("Forbidden");
+struct tagbstring http_404 = bsStatic("Not Found");
+struct tagbstring http_500 = bsStatic("Internal Server Error");
+struct tagbstring http_502 = bsStatic("Bad Gateway");
+struct tagbstring http_503 = bsStatic("Service Unavailable");
+struct tagbstring http_version11 = bsStatic("HTTP/1.1");
+
+struct tagbstring root_path = bsStatic("/");
+struct tagbstring text_html = bsStatic("text/html");
 
 FILE *logging_file;
 bool disable_debug_log = false;
@@ -174,7 +205,7 @@ void log_generic(char *msg, char *tag, int thread_num) {
   fflush(logging_file);
 }
 
-struct clean_on_exit {
+struct clean_on_exit_t {
   bool binded_sock;
   int thread_in_use[THREADS];
 #ifdef _WIN32
@@ -182,16 +213,16 @@ struct clean_on_exit {
 #endif
   int sockfd;
   pthread_t threads[THREADS];
-} clean_on_exit;
+} clean_on_exit_t;
 
 void exit_clean(void) {
-  if (clean_on_exit.binded_sock) {
+  if (clean_on_exit_t.binded_sock) {
     log_info("closing socket\n", OTHER_FUCNTION_THREAD_NUM);
-    CLOSESOCKET(clean_on_exit.sockfd);
+    CLOSESOCKET(clean_on_exit_t.sockfd);
   }
   for (int i = 0; i < THREADS; i++) {
-    if (clean_on_exit.thread_in_use[i]) {
-      pthread_join(clean_on_exit.threads[i], NULL);
+    if (clean_on_exit_t.thread_in_use[i]) {
+      pthread_join(clean_on_exit_t.threads[i], NULL);
     }
   }
 #ifdef _WIN32
@@ -325,14 +356,98 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
   return 0;
 }
 
-typedef struct handle_request_args {
+int send_response(http_response_t *res, int confd) {
+  int ret;
+  bstring response = bfromcstr("");
+  bconcat(response, res->version);
+  bconchar(response, ' ');
+#define RESPONSE_CODE_STRLEN (5)
+  char code_char[RESPONSE_CODE_STRLEN];
+  sprintf(code_char, "%i", res->code);
+  bcatcstr(response, code_char);
+  if (res->message != NULL) {
+    bconchar(response, ' ');
+    bconcat(response, res->message);
+  }
+  if (res->content != NULL) {
+    if (res->headers == NULL) {
+      sh_new_strdup(res->headers);
+    }
+#define RESPONSE_CONTENT_STRLEN (20)
+    char content_char[RESPONSE_CONTENT_STRLEN];
+    sprintf(content_char, "%i", res->content->slen);
+    bstring content_bstr = bfromcstr(content_char);
+    shput(res->headers, "content-length", content_bstr);
+  }
+
+  bconcat(response, &rn_bstr);
+
+  int headers_len = shlen(res->headers);
+  for (int i = 0; i < headers_len; i++) {
+    bcatcstr(response, res->headers[i].key);
+    bconchar(response, ':');
+    bconchar(response, ' ');
+    bconcat(response, res->headers[i].value);
+    bconcat(response, &n_bstr);
+  }
+
+  bconcat(response, &rn_bstr);
+
+  bconcat(response, res->content);
+
+  if (response == NULL) {
+    log_error("unable to create response string", OTHER_FUCNTION_THREAD_NUM);
+    return -1;
+  }
+  ret = send(confd, response->data, response->slen, 0);
+  if (ret < 0) {
+    log_info("failed to send data\n", OTHER_FUCNTION_THREAD_NUM);
+    return -1;
+  }
+  log_info("response: ", OTHER_FUCNTION_THREAD_NUM);
+  if (newline_dummy(response) != 0) {
+    log_error("unable to replace newlines with dummys\n",
+              OTHER_FUCNTION_THREAD_NUM);
+  }
+  fprintf(logging_file, " %s\n", response->data);
+  fflush(logging_file);
+
+  bdestroy(response);
+  return 0;
+}
+
+int create_response(http_request_t *req, http_response_t *res) {
+  if (req == NULL || res == NULL) {
+    log_error("request and/or response given is null\n",
+              OTHER_FUCNTION_THREAD_NUM);
+  }
+  sh_new_strdup(res->headers);
+  if (req->type == HTTP_GET) {
+    if (bstrcmp(req->path, &root_path) == 0) {
+      res->code = 200;
+      res->message = &http_200;
+      res->version = &http_version11;
+      res->content = bfromcstr("hello world");
+      shput(res->headers, "content-type", &text_html);
+      return 0;
+    }
+  }
+  res->code = 404;
+  res->message = &http_404;
+  res->version = &http_version11;
+  res->content = &http_404;
+  shput(res->headers, "content-type", &text_html);
+  return 0;
+}
+
+typedef struct handle_request_args_t {
   int socket;
   int thread_number;
-} handle_request_args;
+} handle_request_args_t;
 
 void *handle_request(void *inargs) {
-  handle_request_args *args = (handle_request_args *)inargs;
-  clean_on_exit.thread_in_use[args->thread_number] = true;
+  handle_request_args_t *args = (handle_request_args_t *)inargs;
+  clean_on_exit_t.thread_in_use[args->thread_number] = true;
   int ret;
 
   bstring request_str = bfromcstr("");
@@ -430,25 +545,11 @@ void *handle_request(void *inargs) {
   fprint_request_struct(&request, logging_file);
   fflush(logging_file);
 
-  // Creating a response and sending it
-  bstring response = bfromcstr("HTTP/1.1 200 OK" RN "Content-Type: "
-                               "text/html" RN "Content-Length: 5" DRN "hello");
-  if (response == NULL) {
-    log_error("unablet to create response string", args->thread_number);
-    goto close_without_response;
-  }
-  ret = send(args->socket, response->data, response->slen, 0);
-  if (ret < 0) {
-    log_info("failed to send data\n", args->thread_number);
-  }
-  log_info("response: ", args->thread_number);
-  if (newline_dummy(response) != 0) {
-    log_error("unable to replace newlines with dummys\n", args->thread_number);
-  }
-  fprintf(logging_file, " %s\n", response->data);
-  fflush(logging_file);
+  http_response_t response;
+  ret = create_response(&request, &response);
+  ret = send_response(&response, args->socket);
 
-  bdestroy(response);
+  // Creating a response and sending it
 
 close_without_response:
 
@@ -456,7 +557,7 @@ close_without_response:
   bdestroy(request_str);
   CLOSESOCKET(args->socket);
 
-  clean_on_exit.thread_in_use[args->thread_number] = false;
+  clean_on_exit_t.thread_in_use[args->thread_number] = false;
   free(inargs);
   return NULL;
 }
@@ -492,7 +593,7 @@ int main(void) {
   int ret;
   int port = PORT;
 
-  clean_on_exit.binded_sock = false;
+  clean_on_exit_t.binded_sock = false;
 
   logging_file = fopen(LOG_FILE, "w+");
   if (logging_file == NULL) {
@@ -513,13 +614,13 @@ int main(void) {
     exit(EXIT_FAILURE);
   }
 
-  if (memset(&clean_on_exit.thread_in_use, false,
-             sizeof(clean_on_exit.thread_in_use)) !=
-      &clean_on_exit.thread_in_use) {
+  if (memset(&clean_on_exit_t.thread_in_use, false,
+             sizeof(clean_on_exit_t.thread_in_use)) !=
+      &clean_on_exit_t.thread_in_use) {
     log_error("unable to use memset\n", MAIN_FUCNTION_THREAD_NUM);
   }
-  if (memset(&clean_on_exit.threads, -1, sizeof(clean_on_exit.threads)) !=
-      &clean_on_exit.threads) {
+  if (memset(&clean_on_exit_t.threads, -1, sizeof(clean_on_exit_t.threads)) !=
+      &clean_on_exit_t.threads) {
     log_error("unable to use memset\n", MAIN_FUCNTION_THREAD_NUM);
   }
 
@@ -579,8 +680,8 @@ int main(void) {
     fflush(logging_file);
     exit(EXIT_FAILURE);
   }
-  clean_on_exit.binded_sock = true;
-  clean_on_exit.sockfd = sockfd;
+  clean_on_exit_t.binded_sock = true;
+  clean_on_exit_t.sockfd = sockfd;
 
   if (set_nonblocking(sockfd) != 0) {
     log_critical("error setting soket to non blocking mode\n",
@@ -616,8 +717,8 @@ int main(void) {
     }
 
     for (int i = 0; i < THREADS; i++) {
-      if (!clean_on_exit.thread_in_use[i]) {
-        handle_request_args *args = malloc(sizeof(handle_request_args));
+      if (!clean_on_exit_t.thread_in_use[i]) {
+        handle_request_args_t *args = malloc(sizeof(handle_request_args_t));
         if (args == NULL) {
           log_critical("unable to allocate space for thread arguments\n",
                        MAIN_FUCNTION_THREAD_NUM);
@@ -625,7 +726,7 @@ int main(void) {
         }
         args->socket = confd;
         args->thread_number = i;
-        pthread_create(&clean_on_exit.threads[i], NULL, handle_request, args);
+        pthread_create(&clean_on_exit_t.threads[i], NULL, handle_request, args);
         break;
       } else if (i + 1 == THREADS) {
         i = -1; // Setting i to -1 so that it will be 0 during the next
