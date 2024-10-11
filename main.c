@@ -25,218 +25,20 @@
 #include <unistd.h>
 #endif
 
-#ifdef _WIN32
-#define SLEEP(a) Sleep(a)
-#define CLOSESOCKET(a) closesocket(a)
-#else
-#define CLOSESOCKET(a) close(a)
-#define SLEEP(a)                                                               \
-  {                                                                            \
-    struct timespec ts;                                                        \
-    ts.tv_sec = (a) / 1000;                                                    \
-    ts.tv_nsec = ((a) % 1000) * 1000000;                                       \
-    nanosleep(&ts, NULL);                                                      \
-  }
-#endif
-
-#define bsStaticList(a)                                                        \
-  (struct tagbstring){(-__LINE__), (int)strlen(a) - 1, (unsigned char *)a};
-
-#define RN "\r\n"
-#define DRN "\r\n\r\n"
-#define DN "\n\n"
-
-#define NON_BLOCKING_EXTRA_SLEEP_MILS                                          \
-  (100) // Sleep time between nonblocking socket calls
-#define REQUEST_TIMEOUT_AFTER_SEC                                              \
-  (20) // Time out amount if proper request is not recieved
-#define OTHER_FUCNTION_THREAD_NUM                                              \
-  (-2) // the thread number of other fucntions like exit_clean and handle_sigint
-#define MAIN_FUCNTION_THREAD_NUM (-1) // the thread number of main function
-#define THREAD_FREE_WAIT_MILS                                                  \
-  (100)                         // The time program waits to check if a thread
-                                // is available
-#define CONSTANT_STRING_AMT (6) // the amount of constant strings
-#define EXIT_PRINTF_ERROR                                                      \
-  (-20) // error code return if the program is unable to use printf
-#define CONNECTION_AMT (10) // The amount of connections given to listen()
-#define BUFFER_SIZE (1024)  // Size of the request buffer.
-#define MAX_BUFFER                                                             \
-  (10) // MAX_BUFFER * BUFFER_SIZE is the mazimum size of a request
-#define LOG_FILE "http-server.log" // the path for the logging file
-#define THREADS (50) // The number of threads for processing requests.
-#define PORT (8080)  // Port that the program uses.
-
-enum Http_request_types {
-  HTTP_GET,
-  HTTP_HEAD,
-  HTTP_POST,
-  HTTP_PUT,
-  HTTP_DELETE,
-  HTTP_CONNECT,
-  HTTP_OPTIONS,
-  HTTP_TRACE,
-  HTTP_PATCH,
-  HTTP_ENUM_MAX,
-};
-
-const char *http_request_strings[HTTP_ENUM_MAX] = {
-    "GET",     "HEAD",    "POST",  "PUT",   "DELETE",
-    "CONNECT", "OPTIONS", "TRACE", "PATCH",
-};
-
-typedef struct http_response_t {
-  bstring version;
-  int code;
-  bstring message;
-  struct { // this uses the stb ds library string hashmap
-    char *key;
-    bstring value;
-  } *headers;
-  bstring content;
-} http_response_t;
-
-typedef struct http_request_t {
-  enum Http_request_types type;
-  bstring path;
-  bstring version;
-  struct { // this uses the stb ds library string hashmap
-    char *key;
-    bstring value;
-  } *headers;
-} http_request_t;
-
-struct tagbstring drn_bstr;
-struct tagbstring dn_bstr;
-struct tagbstring rn_bstr;
-struct tagbstring n_bstr;
-struct tagbstring rn_bstr_dummy;
-struct tagbstring n_bstr_dummy;
-
-struct tagbstring get_bstr;
-struct tagbstring head_bstr;
-struct tagbstring post_bstr;
-struct tagbstring put_bstr;
-struct tagbstring delete_bstr;
-struct tagbstring connect_bstr;
-struct tagbstring options_bstr;
-struct tagbstring trace_bstr;
-struct tagbstring patch_bstr;
-
-struct tagbstring http_100 = bsStatic("Continue");
-struct tagbstring http_101 = bsStatic("Switching Protocols");
-struct tagbstring http_200 = bsStatic("OK");
-struct tagbstring http_201 = bsStatic("Created");
-struct tagbstring http_204 = bsStatic("No Content");
-struct tagbstring http_301 = bsStatic("Moved Permanently");
-struct tagbstring http_302 = bsStatic("Found");
-struct tagbstring http_304 = bsStatic("Not Modified");
-struct tagbstring http_400 = bsStatic("Bad Request");
-struct tagbstring http_401 = bsStatic("Unauthorized");
-struct tagbstring http_403 = bsStatic("Forbidden");
-struct tagbstring http_404 = bsStatic("Not Found");
-struct tagbstring http_500 = bsStatic("Internal Server Error");
-struct tagbstring http_502 = bsStatic("Bad Gateway");
-struct tagbstring http_503 = bsStatic("Service Unavailable");
-struct tagbstring http_version11 = bsStatic("HTTP/1.1");
-
-struct tagbstring root_path = bsStatic("/");
-struct tagbstring text_html = bsStatic("text/html");
+#include "const_str.h"
+#include "defines.h"
 
 FILE *logging_file;
 bool disable_debug_log = false;
 
+#include "logging.h"
+
 int closing_sig = 0;
 bool program_should_close = false;
 
-void fprint_request_struct(http_request_t *request, FILE *file) {
-  fprintf(file, "type: %s, path: %s, version: %s",
-          http_request_strings[request->type], request->path->data,
-          request->version->data);
-  int header_len = shlen(request->headers);
-  if (!(header_len > 0)) {
-    fprintf(file, "\n");
-    return;
-  }
-  for (int i = 0; i < header_len; i++) {
-    fprintf(file, ", %s: %s", request->headers[i].key,
-            request->headers[i].value->data);
-  }
-  fprintf(file, "\n");
-}
+#include "exit_clean.h"
 
-void log_generic(char *msg, char *tag, int thread_num);
-
-void log_debug(char *msg, int thread_num) {
-  if (!(disable_debug_log)) {
-    log_generic(msg, "DEBUG", thread_num);
-  }
-}
-void log_info(char *msg, int thread_num) {
-  log_generic(msg, "INFO", thread_num);
-}
-void log_error(char *msg, int thread_num) {
-  log_generic(msg, "ERROR", thread_num);
-}
-void log_critical(char *msg, int thread_num) {
-  log_generic(msg, "CRITICAL", thread_num);
-}
-
-void log_generic(char *msg, char *tag, int thread_num) {
-  int ret;
-  time_t ut = time(NULL);
-  if ((int)ut < 0) { // if the return value of time function is less that zero
-                     // it is an error
-    log_critical("unable to get proper time", OTHER_FUCNTION_THREAD_NUM);
-  }
-  struct tm *lt = localtime(&ut);
-  struct tm backup = {
-      0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0}; // in case localtime fails we can use this as a fallback
-  if (lt == NULL) {
-    lt = &backup;
-  }
-  ret = fprintf(logging_file, "[%i/%i/%i %i:%i:%i] [%i] [thread: %i] [%s]: %s",
-                lt->tm_mday, lt->tm_mon + 1, lt->tm_year + 1900, lt->tm_hour,
-                lt->tm_min, lt->tm_sec, (int)ut, thread_num, tag, msg);
-  if (ret < 0) {
-    exit(EXIT_PRINTF_ERROR);
-  }
-  fflush(logging_file);
-}
-
-struct clean_on_exit_t {
-  bool binded_sock;
-  int thread_in_use[THREADS];
-#ifdef _WIN32
-  bool wsa_started;
-#endif
-  int sockfd;
-  pthread_t threads[THREADS];
-} clean_on_exit_t;
-
-void exit_clean(void) {
-  if (clean_on_exit_t.binded_sock) {
-    log_info("closing socket\n", OTHER_FUCNTION_THREAD_NUM);
-    CLOSESOCKET(clean_on_exit_t.sockfd);
-  }
-  for (int i = 0; i < THREADS; i++) {
-    if (clean_on_exit_t.thread_in_use[i]) {
-      pthread_join(clean_on_exit_t.threads[i], NULL);
-    }
-  }
-#ifdef _WIN32
-  if (clean_on_exit.wsa_started) {
-    log_info("cleaning wsa\n", OTHER_FUCNTION_THREAD_NUM);
-    WSACleanup();
-  }
-#endif
-  log_info("closing program\n", OTHER_FUCNTION_THREAD_NUM);
-  log_info("closing logging file\n", OTHER_FUCNTION_THREAD_NUM);
-  fclose(logging_file);
-}
-
-void handle_sig(int sig) {
+void handle_closing_sig(int sig) {
   closing_sig = sig;
   program_should_close = true;
 }
@@ -246,13 +48,13 @@ int newline_dummy(bstring string) {
   ret = bfindreplace(string, &rn_bstr, &rn_bstr_dummy, 0);
   if (ret != BSTR_OK) {
     log_error("unable to replace newlines in request",
-              OTHER_FUCNTION_THREAD_NUM);
+              OTHER_FUNCTION_THREAD_NUM);
     return -1;
   }
   ret = bfindreplace(string, &n_bstr, &n_bstr_dummy, 0);
   if (ret != BSTR_OK) {
     log_error("unable to replace newlines in request",
-              OTHER_FUCNTION_THREAD_NUM);
+              OTHER_FUNCTION_THREAD_NUM);
     return -1;
   }
   return 0;
@@ -261,16 +63,17 @@ int newline_dummy(bstring string) {
 // Does not validate path.
 // Returns 0 if successfull.
 int parse_http_request(http_request_t *request, bstring requets_str) {
+  // TODO: null cheking for inpust
   struct bstrList *lines = NULL;
   lines = bsplit(requets_str, '\n');
   if (lines == NULL) {
     log_error("unable to parse request string: pointer is null\n",
-              OTHER_FUCNTION_THREAD_NUM);
+              OTHER_FUNCTION_THREAD_NUM);
     return -1;
   }
   if (lines->qty < 1) {
     log_error("unable to parse request string: qty is less than 1\n",
-              OTHER_FUCNTION_THREAD_NUM);
+              OTHER_FUNCTION_THREAD_NUM);
     bstrListDestroy(lines);
     return -1;
   }
@@ -288,19 +91,20 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
   first_line = bsplit(lines->entry[0], ' ');
   if (first_line == NULL) {
     log_error("unable to parse request string first line: pointer is null\n",
-              OTHER_FUCNTION_THREAD_NUM);
+              OTHER_FUNCTION_THREAD_NUM);
     bstrListDestroy(lines);
     return -1;
   }
   if (first_line->qty < 3) {
     log_error(
         "unable to parse request string first line: qty is leass than 3\n",
-        OTHER_FUCNTION_THREAD_NUM);
+        OTHER_FUNCTION_THREAD_NUM);
     bstrListDestroy(lines);
     bstrListDestroy(first_line);
     return -1;
   }
 
+  // TODO: erro ckeing ja nmull chjeking
   request->path = bstrcpy(first_line->entry[1]);
   request->version = bstrcpy(first_line->entry[2]);
 
@@ -324,7 +128,7 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
   } else if (binstr(first_line->entry[0], 0, &connect_bstr) >= 0) {
     request->type = HTTP_CONNECT;
   } else {
-    log_error("unable to get http request method\n", OTHER_FUCNTION_THREAD_NUM);
+    log_error("unable to get http request method\n", OTHER_FUNCTION_THREAD_NUM);
     bstrListDestroy(lines);
     bstrListDestroy(first_line);
     return -1;
@@ -341,13 +145,23 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
       bstrListDestroy(split_pair);
       continue;
     }
-    bstring value = bstrcpy(split_pair->entry[1]);
-    char *key = malloc(split_pair->entry[0]->slen);
+    bstring value =
+        bstrcpy(split_pair->entry[1]); // TODO: kailikke bstrcpy jutulle pitäis
+                                       // tehä erro cheking
+    char *key =
+        malloc(split_pair->entry[0]
+                   ->slen); // does slen include null term. should looks that up
+    if (key == NULL) {
+      log_error("unable to allocate space for key\n",
+                OTHER_FUNCTION_THREAD_NUM);
+      bstrListDestroy(split_pair);
+      continue;
+    }
     strcpy(key, (const char *)split_pair->entry[0]->data);
     if (isspace(bchar(value, 0))) {
       bdelete(value, 0, 1);
     }
-    shput(request->headers, key, value);
+    shput(request->headers, key, value); // maybe erro cheking for this
     bstrListDestroy(split_pair);
   }
 
@@ -356,39 +170,43 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
   return 0;
 }
 
+// TODO: erro chekcing
+// It is expected that confd is a valit conenction.
 int send_response(http_response_t *res, int confd) {
+  // TODO: null cheking for res
   int ret;
+  // TODO: errro checking for all of these
   bstring response = bfromcstr("");
   bconcat(response, res->version);
   bconchar(response, ' ');
-#define RESPONSE_CODE_STRLEN (5)
   char code_char[RESPONSE_CODE_STRLEN];
-  sprintf(code_char, "%i", res->code);
-  bcatcstr(response, code_char);
+  sprintf(code_char, "%i", res->code); // TODO: error cheking
+  bcatcstr(response, code_char);       // TODO: error cheking
   if (res->message != NULL) {
-    bconchar(response, ' ');
-    bconcat(response, res->message);
+    bconchar(response, ' ');         // TODO: error cheking
+    bconcat(response, res->message); // TODO: error cheking
   }
   if (res->content != NULL) {
     if (res->headers == NULL) {
-      sh_new_strdup(res->headers);
+      sh_new_strdup(res->headers); // TODO: can these be error cheked
     }
-#define RESPONSE_CONTENT_STRLEN (20)
     char content_char[RESPONSE_CONTENT_STRLEN];
-    sprintf(content_char, "%i", res->content->slen);
-    bstring content_bstr = bfromcstr(content_char);
-    shput(res->headers, "content-length", content_bstr);
+    sprintf(content_char, "%i", res->content->slen); // TODO: error cheking
+    bstring content_bstr = bfromcstr(content_char);  // TODO: error cheking
+    shput(res->headers, "content-length",
+          content_bstr); // TODO: can ?error cheking
   }
 
-  bconcat(response, &rn_bstr);
+  bconcat(response, &rn_bstr); // TODO: error cheking
 
   int headers_len = shlen(res->headers);
   for (int i = 0; i < headers_len; i++) {
-    bcatcstr(response, res->headers[i].key);
-    bconchar(response, ':');
-    bconchar(response, ' ');
-    bconcat(response, res->headers[i].value);
-    bconcat(response, &n_bstr);
+    bcatcstr(response, res->headers[i].key); // TODO: error cheking
+    // TODO: make this into one
+    bconchar(response, ':');                  // TODO: error cheking
+    bconchar(response, ' ');                  // TODO: error cheking
+    bconcat(response, res->headers[i].value); // TODO: error cheking
+    bconcat(response, &n_bstr);               // TODO: error cheking
   }
 
   bconcat(response, &rn_bstr);
@@ -396,18 +214,19 @@ int send_response(http_response_t *res, int confd) {
   bconcat(response, res->content);
 
   if (response == NULL) {
-    log_error("unable to create response string", OTHER_FUCNTION_THREAD_NUM);
+    log_error("unable to create response string", OTHER_FUNCTION_THREAD_NUM);
     return -1;
   }
   ret = send(confd, response->data, response->slen, 0);
   if (ret < 0) {
-    log_info("failed to send data\n", OTHER_FUCNTION_THREAD_NUM);
+    log_info("failed to send data\n", OTHER_FUNCTION_THREAD_NUM);
+    bdestroy(response);
     return -1;
   }
-  log_info("response: ", OTHER_FUCNTION_THREAD_NUM);
+  log_info("response: ", OTHER_FUNCTION_THREAD_NUM);
   if (newline_dummy(response) != 0) {
     log_error("unable to replace newlines with dummys\n",
-              OTHER_FUCNTION_THREAD_NUM);
+              OTHER_FUNCTION_THREAD_NUM);
   }
   fprintf(logging_file, " %s\n", response->data);
   fflush(logging_file);
@@ -419,9 +238,11 @@ int send_response(http_response_t *res, int confd) {
 int create_response(http_request_t *req, http_response_t *res) {
   if (req == NULL || res == NULL) {
     log_error("request and/or response given is null\n",
-              OTHER_FUCNTION_THREAD_NUM);
+              OTHER_FUNCTION_THREAD_NUM);
+    return -1;
   }
-  sh_new_strdup(res->headers);
+  sh_new_strdup(
+      res->headers); // TODO: potential erro for cheking for all of these
   if (req->type == HTTP_GET) {
     if (bstrcmp(req->path, &root_path) == 0) {
       res->code = 200;
@@ -436,7 +257,8 @@ int create_response(http_request_t *req, http_response_t *res) {
   res->message = &http_404;
   res->version = &http_version11;
   res->content = &http_404;
-  shput(res->headers, "content-type", &text_html);
+  shput(res->headers, "content-type",
+        &text_html); // TODO: potential erro for cheking for all of these
   return 0;
 }
 
@@ -534,7 +356,10 @@ void *handle_request(void *inargs) {
 
   bdestroy(dummy_request);
 
-  http_request_t request;
+  // TODO:
+  // Potential meory leak if pase http request allocates memory for &request and
+  // errors.
+  http_request_t request = {-1, NULL, NULL, NULL};
   ret = parse_http_request(&request, request_str);
   if (ret != 0) {
     log_error("unable to parse request\n", args->thread_number);
@@ -545,9 +370,41 @@ void *handle_request(void *inargs) {
   fprint_request_struct(&request, logging_file);
   fflush(logging_file);
 
-  http_response_t response;
+  http_response_t response = {NULL, -1, NULL, NULL, NULL};
   ret = create_response(&request, &response);
-  ret = send_response(&response, args->socket);
+  if (ret != 0) {
+    log_error("error creating a response\n", args->thread_number);
+  } else {
+    ret = send_response(&response, args->socket);
+  }
+  if (request.path != NULL) {
+    bdestroy(request.path);
+  }
+  if (request.version != NULL) {
+    bdestroy(request.version);
+  }
+  int tmp_len;
+  if (request.headers != NULL) {
+    tmp_len = shlen(request.headers);
+    for (int i = 0; i < tmp_len; i++) {
+      bdestroy(request.headers[i].value);
+    }
+    shfree(request.headers);
+  }
+
+  // These are not necesary as long as they are stored on the stack.
+  /* bdestroy(response.version); */
+  /* bdestroy(response.message); */
+  if (response.content != NULL) {
+    bdestroy(response.content);
+  }
+  if (response.headers != NULL) {
+    tmp_len = shlen(response.headers);
+    for (int i = 0; i < tmp_len; i++) {
+      bdestroy(response.headers[i].value);
+    }
+    shfree(response.headers);
+  }
 
   // Creating a response and sending it
 
@@ -569,19 +426,19 @@ int set_nonblocking(int sock) {
   unsigned long mode = 1;
   if (ioctlsocket(sock, FIONBIO, &mode) != 0) {
     int err = WSAGetLastError();
-    log_error("Failed to set non-blocking mode:");
-    fprintf(logging_file, " %d\n", OTHER_FUCNTION_THREAD_NUM);
+    log_error("Failed to set non-blocking mode:", OTHER_FUNCTION_THREAD_NUM);
+    fprintf(logging_file, " %d\n", OTHER_FUNCTION_THREAD_NUM);
     fflush(logging_file);
     return -1;
   }
 #else
   int flags = fcntl(sock, F_GETFL, 0);
   if (flags == -1) {
-    log_error("fcntl(F_GETFL) failed\n", OTHER_FUCNTION_THREAD_NUM);
+    log_error("fcntl(F_GETFL) failed\n", OTHER_FUNCTION_THREAD_NUM);
     return -1;
   }
   if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
-    log_error("fcntl(F_SETFL) failed\n", OTHER_FUCNTION_THREAD_NUM);
+    log_error("fcntl(F_SETFL) failed\n", OTHER_FUNCTION_THREAD_NUM);
     return -1;
   }
 #endif
@@ -605,11 +462,11 @@ int main(void) {
     log_critical("unable to set exit function\n", MAIN_FUCNTION_THREAD_NUM);
   }
 
-  if (signal(SIGINT, handle_sig) == SIG_ERR) {
+  if (signal(SIGINT, handle_closing_sig) == SIG_ERR) {
     log_critical("unable to set signal function\n", MAIN_FUCNTION_THREAD_NUM);
     exit(EXIT_FAILURE);
   }
-  if (signal(SIGTERM, handle_sig) == SIG_ERR) {
+  if (signal(SIGTERM, handle_closing_sig) == SIG_ERR) {
     log_critical("unable to set signal function\n", MAIN_FUCNTION_THREAD_NUM);
     exit(EXIT_FAILURE);
   }
