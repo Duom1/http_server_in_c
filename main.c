@@ -25,8 +25,11 @@
 #include <unistd.h>
 #endif
 
-#include "const_str.h"
+// The following code has been split into header files
+// for easier reading.
+// clang-format off
 #include "defines.h"
+#include "const_str.h"
 
 FILE *logging_file;
 bool disable_debug_log = false;
@@ -37,33 +40,22 @@ int closing_sig = 0;
 bool program_should_close = false;
 
 #include "exit_clean.h"
-
-void handle_closing_sig(int sig) {
-  closing_sig = sig;
-  program_should_close = true;
-}
-
-int newline_dummy(bstring string) {
-  int ret;
-  ret = bfindreplace(string, &rn_bstr, &rn_bstr_dummy, 0);
-  if (ret != BSTR_OK) {
-    log_error("unable to replace newlines in request",
-              OTHER_FUNCTION_THREAD_NUM);
-    return -1;
-  }
-  ret = bfindreplace(string, &n_bstr, &n_bstr_dummy, 0);
-  if (ret != BSTR_OK) {
-    log_error("unable to replace newlines in request",
-              OTHER_FUNCTION_THREAD_NUM);
-    return -1;
-  }
-  return 0;
-}
+#include "closing_signals.h"
+// clang-format on
 
 // Does not validate path.
 // Returns 0 if successfull.
+//
+// This function takes in the request string and splits it into
+// lines. It the splits the first line from the space characters
+// and gets the three values such as path, version and method. It
+// then takes all the other lines and splits them and adds them
+// to the headers hash table.
 int parse_http_request(http_request_t *request, bstring requets_str) {
-  // TODO: null cheking for inpust
+  if (requets_str == NULL) {
+    log_error("request string is null", OTHER_FUNCTION_THREAD_NUM);
+    return -1;
+  }
   struct bstrList *lines = NULL;
   lines = bsplit(requets_str, '\n');
   if (lines == NULL) {
@@ -77,6 +69,8 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
     bstrListDestroy(lines);
     return -1;
   }
+
+  // Removing newlines and carridgereturns from all lines.
   for (int i = 0; i < lines->qty; i++) {
     bstring item = lines->entry[i];
     if (bchar(item, item->slen - 1) == '\r') {
@@ -104,9 +98,16 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
     return -1;
   }
 
-  // TODO: erro ckeing ja nmull chjeking
   request->path = bstrcpy(first_line->entry[1]);
+  if (request->path == NULL) {
+    log_error("unable copy path\n", OTHER_FUNCTION_THREAD_NUM);
+    return -1;
+  }
   request->version = bstrcpy(first_line->entry[2]);
+  if (request->version == NULL) {
+    log_error("unable copy version\n", OTHER_FUNCTION_THREAD_NUM);
+    return -1;
+  }
 
   // propably should make a function of this in the future
   if (binstr(first_line->entry[0], 0, &get_bstr) >= 0) {
@@ -148,9 +149,8 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
     bstring value =
         bstrcpy(split_pair->entry[1]); // TODO: kailikke bstrcpy jutulle pitäis
                                        // tehä erro cheking
-    char *key =
-        malloc(split_pair->entry[0]
-                   ->slen); // does slen include null term. should looks that up
+    char *key = malloc(split_pair->entry[0]->slen +
+                       1); // plus one for the null terminator
     if (key == NULL) {
       log_error("unable to allocate space for key\n",
                 OTHER_FUNCTION_THREAD_NUM);
@@ -161,7 +161,7 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
     if (isspace(bchar(value, 0))) {
       bdelete(value, 0, 1);
     }
-    shput(request->headers, key, value); // maybe erro cheking for this
+    shput(request->headers, key, value); // TODO: erro cheking for this
     bstrListDestroy(split_pair);
   }
 
@@ -356,9 +356,6 @@ void *handle_request(void *inargs) {
 
   bdestroy(dummy_request);
 
-  // TODO:
-  // Potential meory leak if pase http request allocates memory for &request and
-  // errors.
   http_request_t request = {-1, NULL, NULL, NULL};
   ret = parse_http_request(&request, request_str);
   if (ret != 0) {
@@ -377,6 +374,9 @@ void *handle_request(void *inargs) {
   } else {
     ret = send_response(&response, args->socket);
   }
+
+close_without_response:
+
   if (request.path != NULL) {
     bdestroy(request.path);
   }
@@ -405,10 +405,6 @@ void *handle_request(void *inargs) {
     }
     shfree(response.headers);
   }
-
-  // Creating a response and sending it
-
-close_without_response:
 
   free(buf);
   bdestroy(request_str);
