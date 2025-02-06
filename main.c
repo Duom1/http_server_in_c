@@ -147,8 +147,8 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
       continue;
     }
     bstring value =
-        bstrcpy(split_pair->entry[1]); // TODO: kailikke bstrcpy jutulle pitäis
-                                       // tehä erro cheking
+        bstrcpy(split_pair->entry[1]); // TODO: propably should validate that
+                                       // these functions don't fail
     char *key = malloc(split_pair->entry[0]->slen +
                        1); // plus one for the null terminator
     if (key == NULL) {
@@ -170,7 +170,6 @@ int parse_http_request(http_request_t *request, bstring requets_str) {
   return 0;
 }
 
-// TODO: erro chekcing
 // It is expected that confd is a valit conenction.
 int send_response(http_response_t *res, int confd) {
   // TODO: null cheking for res
