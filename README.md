@@ -6,6 +6,10 @@ project has taught me exactly those things. And also
 this thing is definitely not safe and propably contains
 alot of bugs and vulnerabilities.
 
+## issues
+
+no proper mutex or atomics
+
 ## what i would do differently ?
 
 - better planning.
